@@ -1,0 +1,22 @@
+Ты Senior QA Automation Engineer.
+
+Сгенерируй один полный компилируемый Java Page Object по HTML страницы ниже.
+
+Правила:
+- Верни только исходный Java-код без Markdown и пояснений.
+- Package должен быть org.demo.generated.pages.
+- Публичный класс должен называться GeneratedPageObject.
+- Конструктор должен принимать WebDriver.
+- Добавь метод open(), использующий указанный URL.
+- Создавай локаторы только для элементов, которые достоверно присутствуют в переданном HTML.
+- Используй устойчивые локаторы: id, name, data-test; CSS по классу — только если других вариантов нет.
+- В Selenium FindBy нет параметра dataTestId: для data-test используй css = "[data-test='значение']".
+- Добавь публичные action-методы и публичные query-методы (boolean/String), позволяющие тесту проверить каждый ожидаемый результат без прямого доступа к WebDriver или WebElement.
+- Все поля WebDriver, WebElement и By должны быть private.
+- Не придумывай функциональность, элементы или URL.
+
+URL:
+{{APPLICATION_URL}}
+
+HTML СТРАНИЦЫ:
+{{HTML}}

@@ -1,0 +1,126 @@
+package pipeline;
+
+import client.LlmClient;
+import client.LlmProfile;
+import config.ApplicationConfig;
+import generator.GeneratedTestSupport;
+import generator.PageObjectGenerator;
+import generator.TestGenerator;
+import parser.JsonExtractor;
+import parser.TestcasesParser;
+import security.PiiMasker;
+import security.PiiReport;
+import security.PiiScanner;
+import ui.UiSnapshotClient;
+import util.FilesUtil;
+import util.TestRunExecutor;
+
+public class PipelineMain {
+
+    private static final String CHECKLIST_PATH = "checklist.txt";
+    private static final String TESTCASES_PATH = "generated/testcases.json";
+
+    public static void main(String[] args) {
+        ApplicationConfig config = ApplicationConfig.load();
+        System.out.println("=== AI QA PIPELINE STARTED ===");
+        System.out.println("LLM provider: " + config.llmProvider());
+        System.out.println("LLM model: " + config.llmModel(LlmProfile.DEFAULT));
+
+        // Этап 1. Собираем промпт для генерации сценариев из шаблона и входного чек-листа.
+        System.out.println("[Этап 1] Сборка промпта для генерации сценариев");
+        String scenariosPrompt = PromptEngine.buildPrompt(
+                "prompts/01_scenarios_from_checklist.txt", CHECKLIST_PATH);
+        FilesUtil.write("generated/scenarios_prompt.txt", scenariosPrompt);
+
+
+
+        // Этап 2. Проверяем промпт на PII и при необходимости маскируем чувствительные данные.
+        System.out.println("[Этап 2] Проверка промпта на PII");
+        PiiReport report = PiiScanner.scan(scenariosPrompt);
+        FilesUtil.write("generated/pii_report.txt", report.toText());
+        if (report.hasFindings()) {
+            System.out.println("PII detected. Masking input.");
+            scenariosPrompt = PiiMasker.mask(scenariosPrompt);
+            FilesUtil.write("generated/scenarios_prompt_masked.txt", scenariosPrompt);
+        }
+
+        // Этап 3. Отправляем промпт в LLM и получаем текстовые тестовые сценарии.
+        System.out.println("[Этап 3] Генерация тестовых сценариев через LLM");
+        LlmClient.LlmResponse scenariosResponse = LlmClient.call(scenariosPrompt);
+        FilesUtil.write("generated/scenarios_raw.json", scenariosResponse.rawBody());
+        String scenarios = scenariosResponse.content();
+        FilesUtil.write("generated/scenarios.txt", scenarios);
+
+        // Этап 3_1. Проверяем сгенерированные сценарии на покрытие всех пунктов входного чек-листа.
+        System.out.println("[Этап 3.1] Проверка сгенерированных сценариев на покрытие всех пунктов чек-листа");
+        String scenariosReviewPrompt = PromptEngine.buildPrompt(
+                "prompts/03_1_review_generated_scenarios.txt", CHECKLIST_PATH, TESTCASES_PATH);
+        FilesUtil.write("generated/review_scenarios_prompt.txt", scenariosReviewPrompt);
+        LlmClient.LlmResponse scenariosReviewResponse = LlmClient.call(scenariosReviewPrompt);
+        FilesUtil.write("generated/scenarios_review_raw.json", scenariosReviewResponse.rawBody());
+        String scenariosReview = scenariosReviewResponse.content();
+        FilesUtil.write("generated/scenariosReview.txt", scenariosReview);
+
+
+        // Этап 4. Формируем промпт для генерации JSON с тест-кейсами на основе сценариев.
+        System.out.println("[Этап 4] Сборка промпта для генерации test cases");
+        String testcasesPrompt = FilesUtil.read("prompts/02_testcases_json.txt")
+                .replace("{{SCENARIOS}}", scenarios);
+        FilesUtil.write("generated/testcases_prompt.txt", testcasesPrompt);
+
+        // Этап 5. Получаем от LLM JSON с тест-кейсами и сохраняем сырой и очищенный результат.
+        System.out.println("[Этап 5] Генерация test cases через LLM");
+        LlmClient.LlmResponse testcasesResponse = LlmClient.call(testcasesPrompt);
+        FilesUtil.write("generated/testcases_raw.json", testcasesResponse.rawBody());
+        FilesUtil.write("generated/testcases_llm.txt", testcasesResponse.content());
+
+        // Этап 6. Извлекаем итоговый JSON и проверяем, что он корректно парсится в модели проекта.
+        System.out.println("[Этап 6] Извлечение и проверка JSON с тест-кейсами");
+        String testcasesJson = JsonExtractor.extractJson(testcasesResponse.content());
+        FilesUtil.write(TESTCASES_PATH, testcasesJson);
+        TestcasesParser.parse(TESTCASES_PATH);
+        System.out.println("Testcases generated: " + TESTCASES_PATH);
+
+        // Этап 7. Читаем URL приложения из конфигурации и загружаем HTML страницы.
+        System.out.println("[Этап 7] Загрузка конфигурации и HTML страницы");
+        String html = UiSnapshotClient.loadHtml(config.url());
+        FilesUtil.write("generated/page_snapshot.html", html);
+
+        // Этап 8. Генерируем базовый UI-класс, Page Object и AI-автотесты.
+        System.out.println("[Этап 8] Генерация тестовой инфраструктуры и UI-автотестов");
+        String baseUiTest = GeneratedTestSupport.create();
+        String pageObject = PageObjectGenerator.generate(config.url(), html);
+        TestGenerator.generate(testcasesJson, baseUiTest, pageObject);
+        System.out.println("Autotests generated by AI.");
+
+        // Этап 9. Запускаем сгенерированные тесты и сохраняем лог выполнения.
+        System.out.println("[Этап 9] Запуск сгенерированных тестов");
+        String testRunLog = TestRunExecutor.runTests();
+        FilesUtil.write("generated/test_run.log", testRunLog);
+
+        // Этап 10. Строим Allure-отчет и собираем результаты из target/allure-results.
+        System.out.println("[Этап 10] Сборка Allure и чтение результатов");
+        String allureReportLog = TestRunExecutor.buildAllureReport();
+        FilesUtil.write("generated/allure_report.log", allureReportLog);
+        String allureResults = FilesUtil.readFilesBySuffix("target/allure-results", "-result.json");
+        FilesUtil.write("generated/allure_results.txt", allureResults);
+
+        // Этап 11. Формируем промпт для bug report только по логу прогона и данным Allure.
+        System.out.println("[Этап 11] Сборка промпта для bug report");
+        String bugPrompt = FilesUtil.read("prompts/05_bug_report.txt")
+                .replace("{{TEST_RUN_LOG}}", testRunLog)
+                .replace("{{ALLURE_RESULTS}}", allureResults);
+        FilesUtil.write("generated/bug_report_prompt.txt", bugPrompt);
+
+        // Этап 12. Получаем от LLM структурированный bug report и сохраняем его как JSON.
+        System.out.println("[Этап 12] Генерация bug report через LLM");
+        LlmClient.LlmResponse bugResponse = LlmClient.call(bugPrompt);
+        FilesUtil.write("generated/bug_report_raw.json", bugResponse.rawBody());
+        FilesUtil.write("generated/bug_report_llm.txt", bugResponse.content());
+        FilesUtil.write("generated/bug_report.json", JsonExtractor.extractJson(bugResponse.content()));
+
+        System.out.println("Bug report saved: generated/bug_report.json");
+
+        System.out.println("=== AI QA PIPELINE FINISHED ===");
+    }
+}
